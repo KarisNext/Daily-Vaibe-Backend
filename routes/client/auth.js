@@ -1,246 +1,476 @@
-// backend/routes/client/auth.js
-const express = require("express");
-const crypto = require("crypto");
-const { getPool } = require("../../config/db");
-
+// backend/routes/client/auth.js - HYBRID (Production & Development)
+const express = require('express');
 const router = express.Router();
+const { getPool } = require('../../config/db');
 
+// ============================================
+// ENVIRONMENT DETECTION
+// ============================================
+const isProduction = process.env.NODE_ENV === 'production';
+const ENV_PREFIX = isProduction ? '🟢 [PROD]' : '🔵 [DEV]';
+
+console.log(`${ENV_PREFIX} Client Auth Routes Loaded`);
+
+// ============================================
+// CONFIGURATION
+// ============================================
+const CONFIG = {
+  sessionCookieName: 'vybeztribe_public_session',
+  csrfHeaderName: 'X-CSRF-Token',
+  maxAge: {
+    anonymous: 30 * 24 * 60 * 60 * 1000, // 30 days
+    authenticated: 30 * 24 * 60 * 60 * 1000, // 30 days
+  },
+  logging: {
+    enabled: !isProduction, // Verbose logging in dev only
+    errors: true, // Always log errors
+  }
+};
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Generate a unique client ID for anonymous users
+ */
 const generateClientId = () => {
-  return 'client_' + crypto.randomBytes(24).toString('hex') + '_' + Date.now();
+  return `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 };
 
-const generateCSRFToken = () => {
-  return crypto.randomBytes(32).toString('hex');
+/**
+ * Generate CSRF token
+ */
+const generateCsrfToken = () => {
+  return `csrf_${Date.now()}_${Math.random().toString(36).substr(2, 16)}`;
 };
 
-const validateClientSession = async (clientId) => {
-  if (!clientId || !clientId.startsWith('client_')) return null;
-  
-  const pool = getPool();
-  const result = await pool.query(
-    'SELECT * FROM user_sessions WHERE session_id = $1 AND is_active = true AND expires_at > NOW()',
-    [clientId]
-  );
-  return result.rows[0] || null;
+/**
+ * Smart logging - only logs in dev or when explicitly enabled
+ */
+const log = (level, action, details = {}) => {
+  if (level === 'error' && CONFIG.logging.errors) {
+    console.error(`❌ ${ENV_PREFIX} [${action}]`, details);
+  } else if (CONFIG.logging.enabled) {
+    const icon = level === 'info' ? '📘' : level === 'success' ? '✅' : '⚠️';
+    console.log(`${icon} ${ENV_PREFIX} [${action}]`, {
+      timestamp: new Date().toISOString(),
+      ...details
+    });
+  }
 };
 
-router.post("/anonymous", async (req, res) => {
+/**
+ * Standard response builder
+ */
+const buildResponse = (res, statusCode, data) => {
+  return res.status(statusCode).json({
+    timestamp: new Date().toISOString(),
+    environment: isProduction ? 'production' : 'development',
+    ...data
+  });
+};
+
+/**
+ * Error response builder
+ */
+const buildErrorResponse = (res, statusCode, message, error = null) => {
+  const response = {
+    success: false,
+    message,
+    timestamp: new Date().toISOString(),
+  };
+
+  // Only include error details in development
+  if (!isProduction && error) {
+    response.error = error instanceof Error ? error.message : String(error);
+    response.stack = error instanceof Error ? error.stack : undefined;
+  }
+
+  return buildResponse(res, statusCode, response);
+};
+
+// ============================================
+// POST /api/client/auth/anonymous
+// Create anonymous session for unauthenticated users
+// Works in: PRODUCTION & DEVELOPMENT
+// ============================================
+router.post('/anonymous', async (req, res) => {
   try {
-    const pool = getPool();
-    const clientId = generateClientId();
-    const csrfToken = generateCSRFToken();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    const userAgent = req.headers['user-agent'] || 'Unknown';
-    const ipAddress = req.ip || req.connection.remoteAddress || 'Unknown';
-
-    await pool.query(`
-      INSERT INTO user_sessions (session_id, user_id, ip_address, user_agent, last_activity, created_at, expires_at, is_active) 
-      VALUES ($1, NULL, $2, $3, NOW(), NOW(), $4, true)
-    `, [clientId, ipAddress, userAgent, expiresAt]);
-
-    res.cookie('vybeztribe_client_session', clientId, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-      domain: process.env.NODE_ENV === 'production' ? '.vybeztribe.com' : undefined,
+    log('info', 'ANONYMOUS_REQUEST', {
+      hasSession: !!req.session,
+      hasClientId: !!req.session?.client_id,
+      sessionId: req.sessionID?.substring(0, 10)
     });
 
-    console.log('Anonymous session created:', clientId);
+    // Initialize session if it doesn't exist
+    if (!req.session) {
+      log('warn', 'NO_SESSION_OBJECT', { sessionID: req.sessionID });
+      return buildErrorResponse(res, 500, 'Session initialization failed - session middleware not working');
+    }
 
-    return res.json({
+    // Check if session already exists
+    if (req.session.client_id) {
+      log('success', 'EXISTING_SESSION', {
+        clientId: req.session.client_id,
+        isAnonymous: req.session.is_anonymous
+      });
+
+      return buildResponse(res, 200, {
+        success: true,
+        isAuthenticated: false,
+        isAnonymous: true,
+        user: null,
+        client_id: req.session.client_id,
+        csrf_token: req.session.csrf_token,
+        message: 'Existing anonymous session',
+        session_age: req.session.created_at ? 
+          Math.floor((Date.now() - new Date(req.session.created_at).getTime()) / 1000) : null
+      });
+    }
+
+    // Create new anonymous session
+    const clientId = generateClientId();
+    const csrfToken = generateCsrfToken();
+
+    req.session.client_id = clientId;
+    req.session.csrf_token = csrfToken;
+    req.session.is_anonymous = true;
+    req.session.created_at = new Date().toISOString();
+
+    // Save session explicitly with promise wrapper
+    await new Promise((resolve, reject) => {
+      req.session.save((err) => {
+        if (err) {
+          log('error', 'SESSION_SAVE_FAILED', { error: err.message });
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    log('success', 'NEW_ANONYMOUS_SESSION', { 
+      clientId, 
+      sessionId: req.sessionID?.substring(0, 10) 
+    });
+
+    return buildResponse(res, 201, {
       success: true,
-      isAuthenticated: true,
+      isAuthenticated: false,
       isAnonymous: true,
       user: null,
       client_id: clientId,
       csrf_token: csrfToken,
-      message: 'Anonymous session created'
+      message: 'Anonymous session created successfully'
     });
 
   } catch (error) {
-    console.error('Anonymous session creation error:', error);
-    return res.status(500).json({
-      success: false,
-      isAuthenticated: false,
-      isAnonymous: true,
-      user: null,
-      client_id: null,
-      csrf_token: generateCSRFToken(),
-      message: 'Session creation failed'
-    });
+    log('error', 'ANONYMOUS_SESSION_ERROR', { error: error.message });
+    return buildErrorResponse(res, 500, 'Internal server error', error);
   }
 });
 
-router.get("/verify", async (req, res) => {
+// ============================================
+// GET /api/client/auth/verify
+// Verify and return current session status
+// Works in: PRODUCTION & DEVELOPMENT
+// ============================================
+router.get('/verify', async (req, res) => {
   try {
-    const pool = getPool();
-    
-    // Clean up expired sessions
-    await pool.query(`
-      UPDATE user_sessions 
-      SET is_active = false 
-      WHERE expires_at < NOW() AND is_active = true
-    `);
+    log('info', 'VERIFY_REQUEST', {
+      hasSession: !!req.session,
+      hasClientId: !!req.session?.client_id,
+      hasUserId: !!req.session?.user_id
+    });
 
-    const clientId = req.cookies?.['vybeztribe_client_session'];
-    
-    console.log('Client session verification for:', clientId);
-    
-    if (!clientId) {
-      return res.status(401).json({
+    // No session exists
+    if (!req.session || !req.session.client_id) {
+      log('warn', 'NO_SESSION_FOUND');
+      
+      return buildResponse(res, 401, {
         success: false,
         isAuthenticated: false,
         isAnonymous: true,
         user: null,
         client_id: null,
-        csrf_token: generateCSRFToken(),
-        message: 'No session found'
+        csrf_token: null,
+        message: 'No active session'
       });
     }
 
-    const session = await validateClientSession(clientId);
-    
-    if (!session) {
-      res.clearCookie('vybeztribe_client_session');
-      return res.status(401).json({
-        success: false,
-        isAuthenticated: false,
-        isAnonymous: true,
-        user: null,
-        client_id: null,
-        csrf_token: generateCSRFToken(),
-        message: 'Invalid session'
+    // Check if authenticated user session
+    if (req.session.user_id) {
+      const pool = getPool();
+      
+      // Verify user still exists and is active
+      const userQuery = `
+        SELECT user_id, email, username, first_name, last_name, 
+               profile_image, role, verified, active, created_at
+        FROM users 
+        WHERE user_id = $1 AND active = true
+      `;
+      
+      const result = await pool.query(userQuery, [req.session.user_id]);
+      
+      if (result.rows.length === 0) {
+        log('warn', 'USER_NOT_FOUND', { userId: req.session.user_id });
+        
+        // User no longer exists or is inactive, destroy session
+        req.session.destroy();
+        
+        return buildResponse(res, 401, {
+          success: false,
+          isAuthenticated: false,
+          isAnonymous: true,
+          user: null,
+          client_id: null,
+          csrf_token: null,
+          message: 'User account not found or inactive'
+        });
+      }
+
+      const user = result.rows[0];
+
+      log('success', 'AUTHENTICATED_SESSION', {
+        userId: user.user_id,
+        email: user.email
+      });
+
+      return buildResponse(res, 200, {
+        success: true,
+        isAuthenticated: true,
+        isAnonymous: false,
+        user: {
+          user_id: user.user_id,
+          email: user.email,
+          username: user.username,
+          first_name: user.first_name,
+          last_name: user.last_name,
+          profile_image: user.profile_image,
+          role: user.role,
+          verified: user.verified
+        },
+        client_id: req.session.client_id,
+        csrf_token: req.session.csrf_token,
+        message: 'Authenticated session verified'
       });
     }
 
-    // Update session activity
-    await pool.query(
-      'UPDATE user_sessions SET last_activity = NOW() WHERE session_id = $1',
-      [clientId]
-    );
-
-    console.log('Client session verified:', clientId);
-
-    return res.json({
-      success: true,
-      isAuthenticated: true,
-      isAnonymous: session.user_id === null,
-      user: session.user_id ? await getUserData(session.user_id, pool) : null,
-      client_id: clientId,
-      csrf_token: generateCSRFToken(),
-      message: 'Session verified'
+    // Anonymous session
+    log('success', 'ANONYMOUS_SESSION_VERIFIED', {
+      clientId: req.session.client_id
     });
 
-  } catch (error) {
-    console.error('Client session verification error:', error);
-    return res.status(500).json({
-      success: false,
+    return buildResponse(res, 200, {
+      success: true,
       isAuthenticated: false,
       isAnonymous: true,
       user: null,
-      client_id: null,
-      csrf_token: generateCSRFToken(),
-      message: 'Verification failed'
+      client_id: req.session.client_id,
+      csrf_token: req.session.csrf_token,
+      message: 'Anonymous session verified'
     });
+  } catch (error) {
+    log('error', 'VERIFY_ERROR', { error: error.message });
+    return buildErrorResponse(res, 500, 'Internal server error', error);
   }
 });
 
-router.post("/refresh", async (req, res) => {
+// ============================================
+// POST /api/client/auth/logout
+// Logout and destroy session
+// Works in: PRODUCTION & DEVELOPMENT
+// ============================================
+router.post('/logout', async (req, res) => {
   try {
-    const clientId = req.cookies?.['vybeztribe_client_session'];
-    const pool = getPool();
-    
-    if (!clientId) {
-      return res.status(401).json({
-        success: false,
-        message: 'No session to refresh'
+    if (!req.session) {
+      log('info', 'NO_SESSION_TO_LOGOUT');
+      
+      return buildResponse(res, 200, {
+        success: true,
+        message: 'No active session to logout'
       });
     }
 
-    const session = await validateClientSession(clientId);
+    const sessionId = req.sessionID;
+    const wasAuthenticated = !!req.session.user_id;
     
-    if (!session) {
-      res.clearCookie('vybeztribe_client_session');
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid session'
+    log('info', 'LOGOUT_REQUEST', { 
+      sessionId: sessionId?.substring(0, 10),
+      wasAuthenticated 
+    });
+
+    req.session.destroy((err) => {
+      if (err) {
+        log('error', 'LOGOUT_FAILED', { error: err.message });
+        return buildErrorResponse(res, 500, 'Failed to logout', err);
+      }
+
+      // Clear session cookie
+      res.clearCookie(CONFIG.sessionCookieName, {
+        path: '/',
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: isProduction ? 'none' : 'lax'
       });
-    }
 
-    const newExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    await pool.query(
-      'UPDATE user_sessions SET expires_at = $1, last_activity = NOW() WHERE session_id = $2',
-      [newExpiry, clientId]
-    );
+      log('success', 'LOGOUT_SUCCESS', { sessionId: sessionId?.substring(0, 10) });
 
-    res.cookie('vybeztribe_client_session', clientId, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-      domain: process.env.NODE_ENV === 'production' ? '.vybeztribe.com' : undefined,
+      return buildResponse(res, 200, {
+        success: true,
+        message: 'Logged out successfully'
+      });
     });
-
-    console.log('Client session refreshed:', clientId);
-
-    return res.json({
-      success: true,
-      client_id: clientId,
-      csrf_token: generateCSRFToken(),
-      message: 'Session refreshed'
-    });
-
   } catch (error) {
-    console.error('Client session refresh error:', error);
-    return res.status(500).json({
+    log('error', 'LOGOUT_ERROR', { error: error.message });
+    return buildErrorResponse(res, 500, 'Internal server error', error);
+  }
+});
+
+// ============================================
+// POST /api/client/auth/refresh
+// Refresh session and extend expiry
+// Works in: PRODUCTION & DEVELOPMENT
+// ============================================
+router.post('/refresh', async (req, res) => {
+  try {
+    log('info', 'REFRESH_REQUEST', {
+      hasSession: !!req.session,
+      hasClientId: !!req.session?.client_id
+    });
+
+    if (!req.session || !req.session.client_id) {
+      log('warn', 'NO_SESSION_TO_REFRESH');
+      
+      return buildResponse(res, 401, {
+        success: false,
+        message: 'No active session to refresh'
+      });
+    }
+
+    // Touch session to update expiry
+    req.session.touch();
+
+    // Generate new CSRF token
+    const newCsrfToken = generateCsrfToken();
+    req.session.csrf_token = newCsrfToken;
+    req.session.last_refreshed = new Date().toISOString();
+
+    req.session.save((err) => {
+      if (err) {
+        log('error', 'REFRESH_FAILED', { error: err.message });
+        return buildErrorResponse(res, 500, 'Failed to refresh session', err);
+      }
+
+      log('success', 'SESSION_REFRESHED', {
+        clientId: req.session.client_id,
+        expiresAt: req.session.cookie.expires
+      });
+
+      return buildResponse(res, 200, {
+        success: true,
+        message: 'Session refreshed successfully',
+        csrf_token: newCsrfToken,
+        expires_at: req.session.cookie.expires,
+        max_age: req.session.cookie.maxAge
+      });
+    });
+  } catch (error) {
+    log('error', 'REFRESH_ERROR', { error: error.message });
+    return buildErrorResponse(res, 500, 'Internal server error', error);
+  }
+});
+
+// ============================================
+// GET /api/client/auth/session-info
+// Get detailed session information
+// Works in: DEVELOPMENT ONLY (disabled in production)
+// ============================================
+router.get('/session-info', (req, res) => {
+  // Only allow in development
+  if (isProduction) {
+    log('warn', 'SESSION_INFO_BLOCKED_PROD');
+    
+    return buildResponse(res, 403, {
       success: false,
-      message: 'Refresh failed'
+      message: 'Endpoint not available in production'
     });
   }
-});
 
-router.post("/logout", async (req, res) => {
-  try {
-    const clientId = req.cookies?.['vybeztribe_client_session'];
-    const pool = getPool();
-    
-    if (clientId) {
-      await pool.query(
-        'UPDATE user_sessions SET is_active = false WHERE session_id = $1',
-        [clientId]
-      );
-      console.log('Client session deactivated:', clientId);
+  log('info', 'SESSION_INFO_REQUEST');
+
+  return buildResponse(res, 200, {
+    success: true,
+    session: {
+      id: req.sessionID,
+      cookie: {
+        originalMaxAge: req.session?.cookie.originalMaxAge,
+        expires: req.session?.cookie.expires,
+        secure: req.session?.cookie.secure,
+        httpOnly: req.session?.cookie.httpOnly,
+        sameSite: req.session?.cookie.sameSite,
+        path: req.session?.cookie.path
+      },
+      data: {
+        client_id: req.session?.client_id,
+        user_id: req.session?.user_id,
+        is_anonymous: req.session?.is_anonymous,
+        created_at: req.session?.created_at,
+        last_refreshed: req.session?.last_refreshed,
+        has_csrf: !!req.session?.csrf_token
+      }
+    },
+    environment: {
+      isProduction,
+      nodeEnv: process.env.NODE_ENV,
+      trustProxy: req.app.get('trust proxy')
     }
-
-    res.clearCookie('vybeztribe_client_session');
-    
-    return res.json({
-      success: true,
-      message: 'Session terminated'
-    });
-
-  } catch (error) {
-    console.error('Client logout error:', error);
-    res.clearCookie('vybeztribe_client_session');
-    return res.json({
-      success: true,
-      message: 'Session cleared'
-    });
-  }
+  });
 });
 
-const getUserData = async (userId, pool) => {
-  try {
-    const result = await pool.query(
-      'SELECT user_id as id, email, first_name, last_name FROM users WHERE user_id = $1',
-      [userId]
-    );
-    return result.rows[0] || null;
-  } catch (error) {
-    console.error('Error fetching user data:', error);
-    return null;
-  }
-};
+// ============================================
+// GET /api/client/auth/health
+// Health check endpoint
+// Works in: PRODUCTION & DEVELOPMENT
+// ============================================
+router.get('/health', (req, res) => {
+  return buildResponse(res, 200, {
+    success: true,
+    service: 'Client Auth Routes',
+    status: 'healthy',
+    endpoints: {
+      anonymous: 'POST /api/client/auth/anonymous',
+      verify: 'GET /api/client/auth/verify',
+      logout: 'POST /api/client/auth/logout',
+      refresh: 'POST /api/client/auth/refresh',
+      sessionInfo: `GET /api/client/auth/session-info ${isProduction ? '(disabled)' : '(enabled)'}`,
+      health: 'GET /api/client/auth/health'
+    }
+  });
+});
+
+// ============================================
+// 404 HANDLER
+// ============================================
+router.use('*', (req, res) => {
+  log('warn', '404_NOT_FOUND', { path: req.originalUrl });
+  
+  return buildResponse(res, 404, {
+    success: false,
+    message: 'Client auth endpoint not found',
+    path: req.originalUrl,
+    available_endpoints: [
+      'POST /api/client/auth/anonymous',
+      'GET /api/client/auth/verify',
+      'POST /api/client/auth/logout',
+      'POST /api/client/auth/refresh',
+      'GET /api/client/auth/session-info (dev only)',
+      'GET /api/client/auth/health'
+    ]
+  });
+});
+
+console.log(`${ENV_PREFIX} Client Auth Routes Ready ✅`);
 
 module.exports = router;

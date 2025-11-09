@@ -45,6 +45,8 @@ router.get('/:slug', async (req, res) => {
         n.updated_at,
         n.youtube_url,
         n.share_count,
+        n.social_videos,
+        n.additional_images,
         COALESCE(a.first_name, 'VybesTribe') as first_name,
         COALESCE(a.last_name, 'Editor') as last_name,
         a.admin_id as author_id,
@@ -71,6 +73,39 @@ router.get('/:slug', async (req, res) => {
     }
 
     const article = result.rows[0];
+
+    // Fetch all images for this article
+    const imagesQuery = `
+      SELECT 
+        image_id,
+        image_url,
+        image_caption,
+        position,
+        is_featured,
+        alt_text,
+        width,
+        height
+      FROM news_images
+      WHERE news_id = $1
+      ORDER BY position ASC, image_order ASC
+    `;
+    const imagesResult = await pool.query(imagesQuery, [article.news_id]);
+
+    // Fetch all videos for this article
+    const videosQuery = `
+      SELECT 
+        video_id,
+        platform,
+        video_url,
+        position,
+        caption,
+        thumbnail_url,
+        duration
+      FROM news_videos
+      WHERE news_id = $1
+      ORDER BY position ASC
+    `;
+    const videosResult = await pool.query(videosQuery, [article.news_id]);
 
     const relatedQuery = `
       SELECT 
@@ -106,12 +141,27 @@ router.get('/:slug', async (req, res) => {
       [article.news_id]
     );
 
+    // Parse social_videos and additional_images from JSONB
+    let socialVideos = [];
+    let additionalImages = [];
+
+    try {
+      socialVideos = article.social_videos || videosResult.rows || [];
+      additionalImages = article.additional_images || imagesResult.rows.filter(img => !img.is_featured) || [];
+    } catch (parseError) {
+      console.warn('Error parsing media:', parseError);
+    }
+
     return res.json({
       success: true,
       article: {
         ...article,
         tags: tagsArray,
         views: (article.views || 0) + 1,
+        social_videos: socialVideos,
+        additional_images: additionalImages,
+        all_images: imagesResult.rows,
+        all_videos: videosResult.rows,
         author: {
           author_id: article.author_id,
           first_name: article.first_name,
@@ -136,6 +186,119 @@ router.get('/:slug', async (req, res) => {
       success: false,
       message: 'Internal server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// NEW: Endpoint to add/update article media
+router.post('/:slug/media', async (req, res) => {
+  try {
+    const pool = getPool();
+    const { slug } = req.params;
+    const { images, videos } = req.body;
+
+    const articleResult = await pool.query(
+      'SELECT news_id FROM news WHERE LOWER(slug) = LOWER($1)',
+      [slug]
+    );
+
+    if (articleResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    const newsId = articleResult.rows[0].news_id;
+
+    // Add images
+    if (images && Array.isArray(images)) {
+      for (const img of images) {
+        await pool.query(`
+          INSERT INTO news_images (news_id, image_url, image_caption, position, alt_text, is_featured)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (news_id, image_url) 
+          DO UPDATE SET 
+            image_caption = EXCLUDED.image_caption,
+            position = EXCLUDED.position,
+            alt_text = EXCLUDED.alt_text
+        `, [newsId, img.url, img.caption || '', img.position || 0, img.alt_text || '', img.is_featured || false]);
+      }
+    }
+
+    // Add videos
+    if (videos && Array.isArray(videos)) {
+      for (const vid of videos) {
+        await pool.query(`
+          INSERT INTO news_videos (news_id, platform, video_url, position, caption)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (news_id, video_url) 
+          DO UPDATE SET 
+            position = EXCLUDED.position,
+            caption = EXCLUDED.caption
+        `, [newsId, vid.platform, vid.url, vid.position || 0, vid.caption || '']);
+      }
+    }
+
+    // Update JSONB columns for quick access
+    await pool.query(`
+      UPDATE news 
+      SET 
+        additional_images = $1::jsonb,
+        social_videos = $2::jsonb
+      WHERE news_id = $3
+    `, [JSON.stringify(images || []), JSON.stringify(videos || []), newsId]);
+
+    return res.json({
+      success: true,
+      message: 'Media updated successfully'
+    });
+
+  } catch (error) {
+    console.error('Error updating article media:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update media'
+    });
+  }
+});
+
+// NEW: Get article media
+router.get('/:slug/media', async (req, res) => {
+  try {
+    const pool = getPool();
+    const { slug } = req.params;
+
+    const articleResult = await pool.query(
+      'SELECT news_id FROM news WHERE LOWER(slug) = LOWER($1)',
+      [slug]
+    );
+
+    if (articleResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Article not found'
+      });
+    }
+
+    const newsId = articleResult.rows[0].news_id;
+
+    const [imagesResult, videosResult] = await Promise.all([
+      pool.query('SELECT * FROM news_images WHERE news_id = $1 ORDER BY position', [newsId]),
+      pool.query('SELECT * FROM news_videos WHERE news_id = $1 ORDER BY position', [newsId])
+    ]);
+
+    return res.json({
+      success: true,
+      images: imagesResult.rows,
+      videos: videosResult.rows
+    });
+
+  } catch (error) {
+    console.error('Error fetching article media:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch media'
     });
   }
 });
