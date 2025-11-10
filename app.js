@@ -14,37 +14,17 @@ const isProduction = process.env.NODE_ENV === 'production';
 console.log('\n🚀 Initializing VybesTribe Backend...');
 console.log('Environment:', isProduction ? 'PRODUCTION' : 'DEVELOPMENT');
 
-testConnection().then(connected => {
-  if (!connected) {
-    console.error('❌ Failed to connect to database');
-    process.exit(1);
-  }
-  console.log('✅ Database connected');
-  
-  CleanupScheduler.start(6).then(result => {
-    if (result.success) {
-      console.log('✅ Cleanup scheduler started');
-    } else {
-      console.error('❌ Failed to start cleanup scheduler:', result.error);
-    }
-  });
-  
-}).catch(err => {
-  console.error('❌ Database connection error:', err);
-  process.exit(1);
-});
-
 const allowedOrigins = isProduction 
   ? [
       'https://vybeztribe.com',
       'https://www.vybeztribe.com',
-      'https://vybeztribe-frontend.onrender.com',
+      process.env.CORS_ORIGIN,
       process.env.FRONTEND_URL
     ].filter(Boolean)
   : [
       'http://localhost:3000',
       'http://localhost:5173',
-      'http://localhost:3001',
+      'http://localhost:5001',
       'http://127.0.0.1:3000'
     ];
 
@@ -53,7 +33,7 @@ console.log('✅ Allowed Origins:', allowedOrigins);
 app.use(cors({
   origin: function(origin, callback) {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else if (!isProduction) {
       console.log('⚠️ DEV MODE: Allowing origin:', origin);
@@ -84,7 +64,7 @@ const adminSessionConfig = {
     tableName: 'admin_session_store',
     createTableIfMissing: true
   }),
-  secret: process.env.SESSION_SECRET || 'vybeztribe-admin-secret-2024',
+  secret: process.env.JWT_SECRET || 'vybeztribe-admin-secret-2024',
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -105,7 +85,7 @@ const publicSessionConfig = {
     tableName: 'public_session_store',
     createTableIfMissing: true
   }),
-  secret: process.env.SESSION_SECRET || 'vybeztribe-public-secret-2024',
+  secret: process.env.JWT_SECRET || 'vybeztribe-public-secret-2024',
   resave: false,
   saveUninitialized: true,
   cookie: {
@@ -170,13 +150,17 @@ console.log('✅ All routes configured');
 
 app.get('/health', async (req, res) => {
   try {
-    const dbConnected = await testConnection();
+    const pool = getPool();
+    const client = await pool.connect();
+    await client.query('SELECT 1');
+    client.release();
+    
     const schedulerStatus = CleanupScheduler.getStatus();
     
     res.json({ 
       status: 'OK', 
       timestamp: new Date().toISOString(),
-      database: dbConnected ? 'Connected' : 'Disconnected',
+      database: 'Connected',
       cleanupScheduler: {
         running: schedulerStatus.isRunning,
         processing: schedulerStatus.isProcessing,
@@ -186,7 +170,11 @@ app.get('/health', async (req, res) => {
       port: process.env.PORT || 5000
     });
   } catch (error) {
-    res.status(500).json({ status: 'ERROR', error: error.message });
+    res.status(500).json({ 
+      status: 'ERROR', 
+      database: 'Disconnected',
+      error: error.message 
+    });
   }
 });
 
@@ -219,14 +207,49 @@ app.use((err, req, res, next) => {
 
 process.on('SIGTERM', async () => {
   console.log('🛑 SIGTERM received, shutting down gracefully');
-  CleanupScheduler.stop();
+  await CleanupScheduler.stop();
+  const { closePool } = require('./config/db');
+  await closePool();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('🛑 SIGINT received, shutting down gracefully');
-  CleanupScheduler.stop();
+  await CleanupScheduler.stop();
+  const { closePool } = require('./config/db');
+  await closePool();
   process.exit(0);
 });
+
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+(async function initializeApp() {
+  try {
+    const connected = await testConnection();
+    if (!connected) {
+      console.error('❌ Failed to connect to database');
+      setTimeout(() => process.exit(1), 1000);
+      return;
+    }
+    console.log('✅ Database connected');
+    
+    const result = await CleanupScheduler.start(6);
+    if (result.success) {
+      console.log('✅ Cleanup scheduler started');
+    } else {
+      console.error('⚠️ Cleanup scheduler failed:', result.error);
+    }
+  } catch (err) {
+    console.error('❌ Initialization error:', err.message);
+    setTimeout(() => process.exit(1), 1000);
+  }
+})();
 
 module.exports = app;
