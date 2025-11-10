@@ -11,13 +11,13 @@ const allowedOrigins = isProduction
   ? [
       'https://vybeztribe.com',
       'https://www.vybeztribe.com',
-      'https://vybeztribe-frontend.onrender.com',
+      process.env.CORS_ORIGIN,
       process.env.FRONTEND_URL
     ].filter(Boolean)
   : [
       'http://localhost:3000',
       'http://localhost:5173',
-      'http://localhost:3001',
+      'http://localhost:5001',
       'http://127.0.0.1:3000'
     ];
 
@@ -27,7 +27,9 @@ const io = new Server(server, {
     credentials: true,
     methods: ['GET', 'POST']
   },
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 io.on('connection', (socket) => {
