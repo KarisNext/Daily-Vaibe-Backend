@@ -35,8 +35,18 @@ testConnection().then(connected => {
 });
 
 const allowedOrigins = isProduction 
-  ? ['https://vybeztribe.com', 'https://www.vybeztribe.com', 'https://vybeztribe-frontend.onrender.com', process.env.FRONTEND_URL].filter(Boolean)
-  : ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://localhost:3001'];
+  ? [
+      'https://vybeztribe.com',
+      'https://www.vybeztribe.com',
+      'https://vybeztribe-frontend.onrender.com',
+      process.env.FRONTEND_URL
+    ].filter(Boolean)
+  : [
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://localhost:3001',
+      'http://127.0.0.1:3000'
+    ];
 
 console.log('✅ Allowed Origins:', allowedOrigins);
 
@@ -110,14 +120,12 @@ const publicSessionConfig = {
   proxy: isProduction
 };
 
-// Session middleware
 const adminSessionMiddleware = session(adminSessionConfig);
 const publicSessionMiddleware = session(publicSessionConfig);
 const geoMiddleware = require('./middleware/geo');
 
 console.log('✅ Session middleware configured');
 
-// Import routes
 const newsRoutes = require('./routes/api/news');
 const articlesRoutes = require('./routes/api/articles');
 const categoriesRoutes = require('./routes/api/categories');
@@ -136,11 +144,9 @@ const geoRoutes = require('./routes/api/geo');
 const systemServicesRoutes = require('./routes/admin/systemServices');
 const adminGeoRoutes = require('./routes/admin/geo');
 
-// Apply public session middleware and geo middleware to public routes
 app.use(publicSessionMiddleware);
 app.use(geoMiddleware);
 
-// Admin routes (with admin session middleware)
 app.use('/api/admin/auth', adminSessionMiddleware, authRoutes);
 app.use('/api/admin/users', adminSessionMiddleware, usersRoutes);
 app.use('/api/admin', adminSessionMiddleware, adminRoutes);
@@ -149,7 +155,6 @@ app.use('/api/retrieve', adminSessionMiddleware, retrieveRoutes);
 app.use('/api/admin/geo', adminSessionMiddleware, adminGeoRoutes);
 app.use('/api/admin/system-services', adminSessionMiddleware, systemServicesRoutes);
 
-// Public API routes
 app.use('/api/news', newsRoutes);
 app.use('/api/articles', articlesRoutes);
 app.use('/api/categories', categoriesRoutes);
@@ -163,7 +168,6 @@ app.use('/api/geo', geoRoutes);
 
 console.log('✅ All routes configured');
 
-// Health check endpoint
 app.get('/health', async (req, res) => {
   try {
     const dbConnected = await testConnection();
@@ -186,7 +190,6 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({
     success: true,
@@ -197,7 +200,6 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -206,7 +208,6 @@ app.use('*', (req, res) => {
   });
 });
 
-// Global error handler
 app.use((err, req, res, next) => {
   console.error('❌ Global error:', err);
   res.status(500).json({
@@ -216,7 +217,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('🛑 SIGTERM received, shutting down gracefully');
   CleanupScheduler.stop();
