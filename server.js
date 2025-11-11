@@ -1,6 +1,7 @@
 const http = require('http');
 const { Server } = require('socket.io');
 const app = require('./app');
+const { testConnection, closePool } = require('./config/db');
 
 const PORT = process.env.PORT || 5000;
 const isProduction = process.env.NODE_ENV === 'production';
@@ -47,15 +48,47 @@ io.on('connection', (socket) => {
 
 app.set('io', io);
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('\n========================================');
-  console.log('🎉 VybesTribe Backend Server Running');
-  console.log('========================================');
-  console.log(`Environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
-  console.log(`Port: ${PORT}`);
-  console.log(`HTTP: http://localhost:${PORT}`);
-  console.log(`WebSocket: Enabled`);
-  console.log('========================================\n');
+process.on('SIGTERM', async () => {
+  console.log('🛑 SIGTERM received');
+  await closePool();
+  server.close(() => {
+    console.log('🔻 Server closed');
+    process.exit(0);
+  });
 });
+
+process.on('SIGINT', async () => {
+  console.log('🛑 SIGINT received');
+  await closePool();
+  server.close(() => {
+    console.log('🔻 Server closed');
+    process.exit(0);
+  });
+});
+
+(async function startServer() {
+  try {
+    const connected = await testConnection();
+    if (!connected) {
+      console.error('❌ Failed to connect to database');
+      process.exit(1);
+    }
+    console.log('✅ Database connected');
+    
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log('\n========================================');
+      console.log('🎉 VybesTribe Backend Server Running');
+      console.log('========================================');
+      console.log(`Environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
+      console.log(`Port: ${PORT}`);
+      console.log(`HTTP: http://0.0.0.0:${PORT}`);
+      console.log(`WebSocket: Enabled`);
+      console.log('========================================\n');
+    });
+  } catch (err) {
+    console.error('❌ Startup error:', err.message);
+    process.exit(1);
+  }
+})();
 
 module.exports = { server, io };
