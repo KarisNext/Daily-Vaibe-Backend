@@ -1,6 +1,7 @@
+
 {
-  "name": "Daily Vaibe-backend",
-  "version": "1.0.0",
+  "name": "daily-vaibe-backend",
+  "version": "2.0.0",
   "description": "Daily Vaibe News Platform Backend API",
   "main": "server.js",
   "scripts": {
@@ -15,7 +16,8 @@
     "fix:sessions:prod": "NODE_ENV=production node scripts/fixSessions.js",
     "test:db": "node scripts/testDb.js",
     "import:db": "node backend/importDatabase.js",
-    "clean": "rm -rf node_modules package-lock.json && npm install"
+    "clean": "rm -rf node_modules package-lock.json && npm install",
+    "postinstall": "echo '✅ Installation complete'"
   },
   "keywords": [
     "news-platform",
@@ -23,31 +25,33 @@
     "api",
     "admin-panel",
     "authentication",
-    "session-management"
+    "session-management",
+    "websocket",
+    "real-time"
   ],
   "author": "Daily Vaibe Team",
   "license": "MIT",
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "compression": "^1.7.4",
-    "connect-pg-simple": "^9.0.1",
-    "cookie-parser": "^1.4.6",
+    "connect-pg-simple": "^10.0.0",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "express": "^4.18.2",
-    "express-rate-limit": "^7.1.5",
-    "express-session": "^1.17.3",
-    "express-validator": "^7.0.1",
-    "helmet": "^7.1.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.18.1",
+    "express-validator": "^7.2.1",
+    "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
-    "pg": "^8.11.3",
+    "pg": "^8.13.1",
     "socket.io": "^4.8.1",
-    "uuid": "^9.0.1",
-    "validator": "^13.11.0"
+    "uuid": "^11.0.3",
+    "validator": "^13.12.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.1.9"
   },
   "engines": {
     "node": ">=18.0.0",
@@ -56,18 +60,22 @@
   "nodemonConfig": {
     "watch": [
       "server.js",
+      "app.js",
       "routes/**/*.js",
       "middleware/**/*.js",
       "config/**/*.js",
       "utils/**/*.js",
-      "scripts/**/*.js"
+      "scripts/**/*.js",
+      "services/**/*.js"
     ],
     "ext": "js,json",
     "ignore": [
       "node_modules/**",
       "logs/**",
+      "uploads/**",
       "*.log"
     ],
-    "delay": 1000
+    "delay": 1000,
+    "verbose": true
   }
 }
