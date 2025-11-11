@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const session = require('express-session');
@@ -7,7 +6,6 @@ const path = require('path');
 require('dotenv').config();
 
 const { getPool, testConnection } = require('./config/db');
-const CleanupScheduler = require('./services/cleanupScheduler');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -156,17 +154,10 @@ app.get('/health', async (req, res) => {
     await client.query('SELECT 1');
     client.release();
     
-    const schedulerStatus = CleanupScheduler.getStatus();
-    
     res.json({ 
       status: 'OK', 
       timestamp: new Date().toISOString(),
       database: 'Connected',
-      cleanupScheduler: {
-        running: schedulerStatus.isRunning,
-        processing: schedulerStatus.isProcessing,
-        nextRun: schedulerStatus.nextRun
-      },
       environment: process.env.NODE_ENV || 'development',
       port: process.env.PORT || 5000
     });
@@ -184,8 +175,7 @@ app.get('/api/test', (req, res) => {
     success: true,
     message: 'VybesTribe API is running',
     environment: process.env.NODE_ENV || 'development',
-    timestamp: new Date().toISOString(),
-    cleanupScheduler: CleanupScheduler.getStatus()
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -205,52 +195,5 @@ app.use((err, req, res, next) => {
     error: !isProduction ? err.message : undefined
   });
 });
-
-process.on('SIGTERM', async () => {
-  console.log('🛑 SIGTERM received, shutting down gracefully');
-  await CleanupScheduler.stop();
-  const { closePool } = require('./config/db');
-  await closePool();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  console.log('🛑 SIGINT received, shutting down gracefully');
-  await CleanupScheduler.stop();
-  const { closePool } = require('./config/db');
-  await closePool();
-  process.exit(0);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('💥 Uncaught Exception:', error);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-(async function initializeApp() {
-  try {
-    const connected = await testConnection();
-    if (!connected) {
-      console.error('❌ Failed to connect to database');
-      setTimeout(() => process.exit(1), 1000);
-      return;
-    }
-    console.log('✅ Database connected');
-    
-    const result = await CleanupScheduler.start(6);
-    if (result.success) {
-      console.log('✅ Cleanup scheduler started');
-    } else {
-      console.error('⚠️ Cleanup scheduler failed:', result.error);
-    }
-  } catch (err) {
-    console.error('❌ Initialization error:', err.message);
-    setTimeout(() => process.exit(1), 1000);
-  }
-})();
 
 module.exports = app;
